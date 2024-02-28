@@ -1,0 +1,227 @@
+# Fetching the VM credential
+try {
+    $vCenterCredential = Get-Credential #-Target $configFile.vCenterCredential
+    $vCenterDetails = $configFile.vCenterServerName -split ','
+}
+catch {
+    & $LogEntry -LogMessage "ERROR - $_"
+}
+
+# Define your vCenter server details
+$vCenterServer = ""
+$vCenterUsername = $vCenterCredential.Username
+$vCenterPassword = $vCenterCredential.GetNetworkCredential().Password
+
+# Connect to vCenter server
+Connect-VIServer -Server $vCenterServer -User $vCenterUsername -Password $vCenterPassword
+
+# 1. General Details
+$vcDetails = Get-View ServiceInstance
+$vcName = $vcDetails.Content.About.Name
+$vcVersion = $vcDetails.Content.About.Version
+$vcBuild = $vcDetails.Content.About.Build
+
+# 2. Number of Hosts
+$hostCount = Get-VMHost | Measure-Object | Select-Object -ExpandProperty Count
+
+# 3. Number of Templates
+$templateCount = (Get-VM | Where-Object { $_.ExtensionData.Config.Template }).Count
+
+# 4. Hosts in Maintenance Mode
+$hostsMaintenance = (Get-VMHost | Where-Object { $_.ConnectionState -eq "Maintenance" }).Name -join ", "
+
+# 5. Hosts in Disconnected State
+$hostsDisconnected = (Get-VMHost | Where-Object { $_.ConnectionState -eq "Disconnected" }).Name -join ", "
+
+# Get the ESXi host object
+$esxiHost = Get-VMHost -Name $hostName
+ 
+if ($esxiHost) {
+    # Get all services on the host
+    $services = Get-VMHostService -VMHost $esxiHost
+ 
+    # Get the NTP service
+    $ntpService = $services | Where-Object { $_.Key -eq "ntpd" }
+ 
+    if ($ntpService) {
+        $serviceName = $ntpService.Label
+        $serviceStatus = if ($ntpService.Running) { "Running" } else { "Stopped" }
+        Write-Host "NTP Service: $serviceName, Status: $serviceStatus"
+        }
+    }
+
+# Get all ESXi hosts
+$esxiHosts = Get-VMHost
+
+# Get NTP Services for all hosts
+$ntpServices = $esxiHosts | ForEach-Object {
+    $ntpService = $_ | Get-VMHostService | Where-Object { $_.Key -eq "ntpd" }
+    [PSCustomObject]@{
+        HostName = $_.Name
+        ServiceState = if ($ntpService) { $ntpService.RunningState } else { "N/A" }
+    }
+}
+
+# Active Alerts
+$activeAlerts = "Host connection and power state", "No compatible host for Secondary VM", "Update Manager Service Health Alarm", "VXR01000D ALARM, vMon API Service Health Alarm, Component Manager Service Health Alarm, VMware vSphere Authentication Proxy Service Health Alarm, vSAN Health Service Alarm, PostgreSQL Archiver Service Health Alarm, VMware vCenter-Services Health Alarm, Hybrid vCenter Service Health Alarm"
+
+# Dead SCSI Luns
+$deadLuns = (Get-VMHost | Get-ScsiLun | Where-Object { $_.MultipathPolicy -eq "Dead" }).CanonicalName -join ", "
+
+# Disconnect from vCenter server
+Disconnect-VIServer -Server $vCenterServer -Confirm:$false
+
+# Generate the output report in HTML
+$htmlContent = @"
+<!DOCTYPE html>
+<html>
+<head>
+    <title>vCenter Server Report</title>
+    <style>
+        body {
+            text-align: center;
+        }
+        .table-container {
+            margin: 20px auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid black;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #f2f2f2;
+        }
+    </style>
+</head>
+<body>
+    <h1>ESXI Health Check Report</h1>
+
+    <div class="table-container">
+        <h2>General Details</h2>
+        <table>
+            <tr>
+                <th>vCenter Name</th>
+                <td>$vcName</td>
+            </tr>
+            <tr>
+                <th>vCenter Version</th>
+                <td>$vcVersion</td>
+            </tr>
+            <tr>
+                <th>vCenter Build</th>
+                <td>$vcBuild</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="table-container">
+        <h2>Hosts Details</h2>
+        <table>
+            <tr>
+                <th>Number of Hosts</th>
+            </tr>
+            <tr>
+                <td>$hostCount</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="table-container">
+        <h2>Templates Details</h2>
+        <table>
+            <tr>
+                <th>Number of Templates</th>
+            </tr>
+            <tr>
+                <td>$templateCount</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="table-container">
+        <h2>Hosts in Maintenance Mode</h2>
+        <table>
+            <tr>
+                <th>Hosts in Maintenance Mode</th>
+            </tr>
+            <tr>
+                <td>$hostsMaintenance</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="table-container">
+        <h2>Hosts in Disconnected State</h2>
+        <table>
+            <tr>
+                <th>Hosts in Disconnected State</th>
+            </tr>
+            <tr>
+                <td>$hostsDisconnected</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="table-container">
+        <h2>NTP Service Check</h2>
+        <table>
+            <tr>
+                <th>Host Name</th>
+                <th>Service Status</th>
+            </tr>
+"@
+
+foreach ($ntpService in $ntpServices) {
+    $htmlContent += @"
+            <tr>
+                <td>$($ntpService.HostName)</td>
+                <td>$($ntpService.ServiceState)</td>
+            </tr>
+"@
+}
+
+$htmlContent += @"
+        </table>
+    </div>
+
+    <div class="table-container">
+        <h2>Host Active Alerts</h2>
+        <table>
+"@
+
+foreach ($alert in $activeAlerts) {
+    $htmlContent += @"
+            <tr>
+                <td><strong>$alert</strong></td>
+            </tr>
+"@
+}
+
+$htmlContent += @"
+        </table>
+    </div>
+
+    <div class="table-container">
+        <h2>Dead SCSI Luns</h2>
+        <table>
+            <tr>
+                <th>Dead LUNs</th>
+            </tr>
+            <tr>
+                <td>$deadLuns</td>
+            </tr>
+        </table>
+    </div>
+
+</body>
+</html>
+"@
+
+# Save the HTML report to a file
+$htmlContent | Out-File -FilePath "C:\Users\SAMADANK\Desktop\output0194.html" -Encoding UTF8
